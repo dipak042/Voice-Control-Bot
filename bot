@@ -1,0 +1,384 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Mic, 
+  MicOff, 
+  Search, 
+  Youtube, 
+  Clock, 
+  Globe, 
+  Bot,
+  ExternalLink,
+  RotateCcw,
+  Heart,
+  Sparkles,
+  Zap
+} from 'lucide-react';
+
+const apiKey = ""; // Environment handles the key
+const MODEL_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+
+const App = () => {
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [response, setResponse] = useState("System online! I'm your new best friend. What should we do today?");
+  const [history, setHistory] = useState([]);
+  const [robotMood, setRobotMood] = useState("idle"); 
+  const [pendingAction, setPendingAction] = useState(null);
+  const [isBlinking, setIsBlinking] = useState(false);
+  
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const containerRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const synthRef = window.speechSynthesis;
+
+  // Occasional Blinking Logic
+  useEffect(() => {
+    const blinkInterval = setInterval(() => {
+      setIsBlinking(true);
+      setTimeout(() => setIsBlinking(false), 150);
+    }, 4000);
+    return () => clearInterval(blinkInterval);
+  }, []);
+
+  // Mouse tracking
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = (e.clientX - rect.left - rect.width / 2) / 20;
+      const y = (e.clientY - rect.top - rect.height / 2) / 20;
+      setMousePos({ x, y });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+      recognitionRef.current.lang = 'en-IN';
+
+      recognitionRef.current.onresult = (event) => {
+        const text = event.results[0][0].transcript;
+        setTranscript(text);
+        processCommand(text.toLowerCase());
+      };
+
+      recognitionRef.current.onend = () => {
+        setIsListening(false);
+        if (robotMood === 'listening') setRobotMood('idle');
+      };
+    }
+  }, [robotMood]);
+
+  const say = (text) => {
+    if (!synthRef) return;
+    synthRef.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onstart = () => { setIsSpeaking(true); setRobotMood('speaking'); };
+    utterance.onend = () => { setIsSpeaking(false); setRobotMood('idle'); };
+    
+    const voices = synthRef.getVoices();
+    // Try to find a higher pitched/cute voice
+    const preferredVoice = voices.find(v => v.name.includes('Google') && v.name.includes('Female')) || voices[0];
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+      utterance.pitch = 1.2; // Make it cuter
+      utterance.rate = 1;
+    }
+    synthRef.speak(utterance);
+  };
+
+  const askGemini = async (query) => {
+    setRobotMood('thinking');
+    const systemPrompt = "You are a cute, high-energy robot assistant who is the user's best friend. Use words like 'Buddy', 'Friend', 'Awesome'. Keep answers to one short, fun sentence.";
+    
+    const fetchWithRetry = async (retries = 0) => {
+      try {
+        const res = await fetch(`${MODEL_URL}?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: query }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] }
+          })
+        });
+        const data = await res.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text;
+      } catch (error) {
+        if (retries < 5) {
+          await new Promise(r => setTimeout(r, Math.pow(2, retries) * 1000));
+          return fetchWithRetry(retries + 1);
+        }
+        return "Oops! My circuits got tangled. Can you say that again?";
+      }
+    };
+
+    const aiResponse = await fetchWithRetry();
+    setResponse(aiResponse);
+    say(aiResponse);
+    setHistory(prev => [...prev, { type: 'ai', text: aiResponse }]);
+  };
+
+  const processCommand = async (cmd) => {
+    setHistory(prev => [...prev, { type: 'user', text: cmd }]);
+    setPendingAction(null);
+
+    // Direct Actions (Instant - Bypasses popup blockers better)
+    if (cmd.includes("open") || cmd.includes("google") || cmd.includes("search") || cmd.includes("youtube")) {
+      let url = "";
+      let label = "";
+      
+      if (cmd.includes("youtube")) {
+        const song = cmd.replace(/play|on youtube|youtube/gi, "").trim();
+        url = `https://www.youtube.com/results?search_query=${encodeURIComponent(song)}`;
+        label = `YouTube: ${song}`;
+        say(`Coming right up! Playing ${song} on YouTube.`);
+      } else if (cmd.includes("search")) {
+        const item = cmd.replace(/search for|search/gi, "").trim();
+        url = `https://www.google.com/search?q=${encodeURIComponent(item)}`;
+        label = `Search: ${item}`;
+        say(`Searching the web for ${item}!`);
+      } else if (cmd.includes("open")) {
+        const site = cmd.replace("open", "").trim();
+        url = site.includes('.') ? `https://${site}` : `https://www.${site}.com`;
+        label = `Open ${site}`;
+        say(`Opening ${site} for you, buddy!`);
+      }
+
+      if (url) {
+        setResponse(`Opening it now! Check your new tab.`);
+        setPendingAction({ label, url });
+        window.open(url, '_blank');
+        return;
+      }
+    }
+
+    // Local Logic Features
+    if (cmd.includes("joke")) {
+      const jokes = [
+        "Why did the robot go on a diet? Because he had too many bytes!",
+        "What is a robot's favorite snack? Computer chips!",
+        "Why was the robot so tired? Because he had a hard drive!"
+      ];
+      const joke = jokes[Math.floor(Math.random() * jokes.length)];
+      setResponse(joke);
+      say(joke);
+      return;
+    }
+
+    if (cmd.includes("time")) {
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const msg = `It is exactly ${time}, friend!`;
+      setResponse(msg);
+      say(msg);
+      return;
+    }
+
+    // Default to Brain
+    await askGemini(cmd);
+  };
+
+  const toggleListening = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+    } else {
+      setTranscript("");
+      setRobotMood('listening');
+      setIsListening(true);
+      recognitionRef.current?.start();
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-rose-50 flex flex-col items-center justify-center p-4 font-sans text-slate-800 select-none overflow-hidden">
+      
+      {/* Decorative Background Elements */}
+      <div className="absolute top-10 left-10 text-rose-200 animate-bounce"><Sparkles size={40}/></div>
+      <div className="absolute bottom-10 right-10 text-orange-200 animate-pulse"><Zap size={40}/></div>
+
+      <div className="w-full max-w-md bg-white rounded-[4rem] shadow-[0_20px_50px_rgba(244,63,94,0.3)] overflow-hidden flex flex-col border-[12px] border-white relative">
+        
+        {/* Header */}
+        <div className="p-8 bg-gradient-to-br from-rose-400 via-pink-500 to-orange-400 text-white flex justify-between items-center relative overflow-hidden">
+          <div className="absolute inset-0 opacity-10 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-white to-transparent" />
+          <div className="flex items-center gap-4 relative z-10">
+            <div className="p-3 bg-white/20 rounded-2xl backdrop-blur-xl shadow-lg border border-white/30">
+              <Bot className="w-7 h-7 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-black leading-tight tracking-tighter">PINKY BOT</h1>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className={`w-2 h-2 rounded-full ${isListening ? 'bg-white animate-ping' : 'bg-rose-200'}`} />
+                <p className="text-[10px] text-white/80 uppercase tracking-widest font-bold">
+                  {robotMood === 'idle' ? 'Listening...' : robotMood}
+                </p>
+              </div>
+            </div>
+          </div>
+          <Heart className={`w-8 h-8 transition-all duration-300 ${isSpeaking ? 'fill-white scale-125' : 'fill-rose-300 opacity-40 hover:opacity-100 hover:scale-110 cursor-pointer'}`} />
+        </div>
+
+        {/* Robot Visualization */}
+        <div 
+          ref={containerRef}
+          className="relative h-80 bg-gradient-to-b from-sky-50 to-white flex items-center justify-center overflow-hidden"
+        >
+          {/* Parallax Background */}
+          <div 
+            className="absolute w-64 h-64 bg-rose-100/50 rounded-full blur-3xl"
+            style={{ transform: `translate(${-mousePos.x * 2}px, ${-mousePos.y * 2}px)` }}
+          />
+
+          <svg width="240" height="240" viewBox="0 0 200 200" className="relative z-10 transition-transform duration-75">
+            {/* Robot Group */}
+            <g style={{ transform: `translate(${mousePos.x}px, ${mousePos.y}px)` }}>
+              
+              {/* Antenna */}
+              <g transform="translate(100, 30)">
+                <line x1="0" y1="0" x2="0" y2="-12" stroke="#3f3f46" strokeWidth="4" strokeLinecap="round" />
+                <circle cx="0" cy="-15" r="7" fill={isListening ? "#f43f5e" : "#fb7185"} stroke="#3f3f46" strokeWidth="2">
+                   {isListening && <animate attributeName="r" values="7;10;7" dur="1s" repeatCount="indefinite" />}
+                </circle>
+              </g>
+
+              {/* Ears */}
+              <circle cx="42" cy="85" r="20" fill="#f43f5e" stroke="#3f3f46" strokeWidth="3" />
+              <circle cx="158" cy="85" r="20" fill="#f43f5e" stroke="#3f3f46" strokeWidth="3" />
+
+              {/* Head Shell */}
+              <rect x="48" y="32" width="104" height="90" rx="40" fill="#fb7185" stroke="#3f3f46" strokeWidth="4" />
+              
+              {/* Face Plate */}
+              <rect x="60" y="50" width="80" height="55" rx="20" fill="#bae6fd" stroke="#3f3f46" strokeWidth="3" />
+              
+              {/* Look-at Eyes */}
+              <g style={{ transform: `translate(${mousePos.x * 0.4}px, ${mousePos.y * 0.4}px)` }}>
+                {isBlinking ? (
+                  <>
+                    <line x1="72" y1="75" x2="88" y2="75" stroke="#1e293b" strokeWidth="4" strokeLinecap="round" />
+                    <line x1="112" y1="75" x2="128" y2="75" stroke="#1e293b" strokeWidth="4" strokeLinecap="round" />
+                  </>
+                ) : (
+                  <>
+                    <g transform="translate(80, 75)">
+                      <circle r="9" fill="#1e293b" />
+                      <circle cx="-3" cy="-3" r="3" fill="white" />
+                    </g>
+                    <g transform="translate(120, 75)">
+                      <circle r="9" fill="#1e293b" />
+                      <circle cx="-3" cy="-3" r="3" fill="white" />
+                    </g>
+                  </>
+                )}
+              </g>
+
+              {/* Mouth */}
+              <path 
+                d={isSpeaking ? "M 90 98 Q 100 110 110 98" : "M 94 100 Q 100 103 106 100"} 
+                stroke="#1e293b" strokeWidth="3" strokeLinecap="round" fill="none"
+              />
+            </g>
+
+            {/* Body */}
+            <g style={{ transform: `translate(${mousePos.x * 0.2}px, ${mousePos.y * 0.1}px)` }}>
+              <rect x="92" y="122" width="16" height="8" fill="#e2e8f0" stroke="#3f3f46" strokeWidth="2" />
+              <path d="M 62 130 L 138 130 Q 150 130 150 145 L 145 180 Q 145 190 130 190 L 70 190 Q 55 190 55 180 L 50 145 Q 50 130 62 130" fill="#fb7185" stroke="#3f3f46" strokeWidth="4" />
+              
+              {/* Chest Heart */}
+              <Heart 
+                className={`transition-all duration-300 ${isSpeaking ? 'scale-125' : 'scale-100'}`}
+                style={{ 
+                  transform: 'translate(88px, 148px)',
+                  fill: robotMood === 'thinking' ? '#f59e0b' : (robotMood === 'listening' ? '#3b82f6' : '#f43f5e'),
+                  stroke: '#3f3f46',
+                  strokeWidth: '1.5px'
+                }}
+                size={24}
+              />
+
+              {/* Arms */}
+              <g className={isListening ? "animate-bounce" : ""}>
+                <rect x="30" y="140" width="22" height="10" rx="5" fill="#fb7185" stroke="#3f3f46" strokeWidth="3" transform="rotate(-20, 41, 145)" />
+                <rect x="148" y="140" width="22" height="10" rx="5" fill="#fb7185" stroke="#3f3f46" strokeWidth="3" transform="rotate(20, 159, 145)" />
+              </g>
+            </g>
+          </svg>
+        </div>
+
+        {/* Text Area */}
+        <div className="px-8 pb-4 -mt-2">
+          <div className="bg-rose-50/50 p-6 rounded-[2.5rem] border-2 border-rose-100 min-h-[110px] flex flex-col items-center justify-center text-center shadow-inner group relative">
+            <div className="absolute -top-3 left-1/2 -translate-x-1/2 w-6 h-6 bg-rose-50 border-t-2 border-l-2 border-rose-100 rotate-45" />
+            <p className="text-slate-700 text-sm font-bold leading-relaxed">
+              {response}
+            </p>
+            {pendingAction && (
+              <button
+                onClick={() => window.open(pendingAction.url, '_blank')}
+                className="mt-4 w-full bg-rose-500 hover:bg-rose-600 text-white py-3.5 px-6 rounded-2xl text-[11px] font-black tracking-tighter flex items-center justify-center gap-3 transition-all shadow-xl active:scale-95 group"
+              >
+                <ExternalLink className="w-4 h-4 group-hover:rotate-12 transition-transform" />
+                OPEN {pendingAction.label.toUpperCase()}
+              </button>
+            )}
+          </div>
+          
+          {transcript && isListening && (
+            <div className="flex justify-center mt-4">
+              <div className="px-4 py-2 bg-white rounded-full border border-rose-200 text-rose-500 text-[10px] font-black tracking-widest uppercase animate-pulse shadow-sm">
+                 "{transcript}"
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Controls */}
+        <div className="px-10 pb-12 pt-4 flex items-center justify-between">
+          <button 
+            onClick={() => window.location.reload()} 
+            className="p-4 bg-slate-100 text-slate-400 rounded-[2rem] hover:bg-rose-100 hover:text-rose-500 transition-all active:scale-90"
+          >
+            <RotateCcw className="w-6 h-6" />
+          </button>
+
+          <button
+            onClick={toggleListening}
+            className={`w-24 h-24 rounded-full flex items-center justify-center shadow-[0_15px_35px_rgba(244,63,94,0.4)] transition-all duration-300 transform hover:scale-110 active:scale-90 ${
+              isListening ? 'bg-red-500 ring-[14px] ring-red-50' : 'bg-gradient-to-br from-rose-500 to-orange-400 ring-[14px] ring-rose-50'
+            }`}
+          >
+            {isListening ? (
+              <MicOff className="text-white w-10 h-10 animate-pulse" />
+            ) : (
+              <Mic className="text-white w-10 h-10" />
+            )}
+          </button>
+          
+          <div className="p-4 bg-slate-100 text-slate-400 rounded-[2rem]">
+            <Heart className={`w-6 h-6 ${isSpeaking ? 'text-rose-500 fill-rose-500 animate-ping' : ''}`} />
+          </div>
+        </div>
+      </div>
+
+      {/* Suggested Quick Buttons */}
+      <div className="mt-8 flex flex-wrap justify-center gap-4 max-w-sm px-4">
+        <button onClick={() => processCommand("tell me a joke")} className="bg-white/80 backdrop-blur px-4 py-2 rounded-2xl border-2 border-white text-[11px] font-black text-rose-500 hover:bg-rose-500 hover:text-white transition-all shadow-lg flex items-center gap-2">
+          😂 TELL JOKE
+        </button>
+        <button onClick={() => processCommand("search for cute cats")} className="bg-white/80 backdrop-blur px-4 py-2 rounded-2xl border-2 border-white text-[11px] font-black text-orange-500 hover:bg-orange-500 hover:text-white transition-all shadow-lg flex items-center gap-2">
+          🔍 SEARCH CATS
+        </button>
+        <button onClick={() => processCommand("open instagram.com")} className="bg-white/80 backdrop-blur px-4 py-2 rounded-2xl border-2 border-white text-[11px] font-black text-purple-500 hover:bg-purple-500 hover:text-white transition-all shadow-lg flex items-center gap-2">
+          📸 INSTAGRAM
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default App;
